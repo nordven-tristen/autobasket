@@ -8,8 +8,14 @@ venv/
 env/
 .venv/
 
+# Secrets - NEVER commit!
+.env
+
 # Browser data (contains session cookies)
 ozon_browser_data/
+
+# Generated files
+shopping_list.txt
 
 # IDE
 .idea/

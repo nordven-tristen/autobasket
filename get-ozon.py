@@ -3,12 +3,14 @@
 Использует Playwright для браузерной автоматизации и PaddleOCR для распознавания текста
 """
 
+import argparse
 import asyncio
 import io
 import os
 import random
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -32,13 +34,27 @@ class Config:
     USER_DATA_DIR: str = "./ozon_browser_data"
     # Ждать ручного логина при первом запуске
     WAIT_FOR_LOGIN: bool = True
+    # Файл со списком покупок (генерируется telegram_bot.py)
+    SHOPPING_LIST_FILE: str = "./shopping_list.txt"
 
 
 # ============ СПИСОК ПОКУПОК ============
 
-pokupki = [
-    "сливочное масло 82,5%",
-]
+def load_shopping_list() -> list[str]:
+    """Загружает список покупок из файла или возвращает дефолтный"""
+    filepath = Path(Config.SHOPPING_LIST_FILE)
+    if filepath.exists():
+        with open(filepath, 'r', encoding='utf-8') as f:
+            items = [line.strip() for line in f if line.strip()]
+            if items:
+                print(f"📋 Загружен список из {filepath}: {len(items)} позиций")
+                return items
+
+    # Дефолтный список если файл не найден
+    return ["сливочное масло 82,5%"]
+
+
+pokupki = load_shopping_list()
 
 
 # ============ МОДЕЛЬ ТОВАРА ============

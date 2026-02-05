@@ -1,7 +1,7 @@
 """
 Telegram бот для формирования списка покупок
 Принимает сообщения с рецептами или списками продуктов,
-обрабатывает через Claude API и запускает автоматизацию Ozon
+обрабатывает через LLM (Claude или GigaChat) и запускает автоматизацию Ozon
 """
 
 import asyncio
@@ -9,15 +9,16 @@ import os
 import yaml
 from pathlib import Path
 from dotenv import load_dotenv
-from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+from llm_client import create_llm_client, LLMClient
 
 # Загружаем переменные окружения
 load_dotenv()
 
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "claude")
 
 # Загружаем предпочтения
 PREFERENCES_FILE = Path(__file__).parent / "preferences.yaml"
@@ -31,8 +32,8 @@ def load_preferences() -> dict:
     return {}
 
 
-def get_claude_prompt(preferences: dict) -> str:
-    """Формирует системный промпт для Claude"""
+def get_system_prompt(preferences: dict) -> str:
+    """Формирует системный промпт для LLM"""
 
     default_servings = preferences.get('default_servings', 3)
     favorite_brands = preferences.get('favorite_brands', {})
@@ -86,32 +87,34 @@ class ShoppingListBot:
     """Telegram бот для формирования списка покупок"""
 
     def __init__(self):
-        self.claude = Anthropic(api_key=CLAUDE_API_KEY)
+        self.llm: LLMClient = create_llm_client(LLM_PROVIDER)
         self.preferences = load_preferences()
-        self.system_prompt = get_claude_prompt(self.preferences)
+        self.system_prompt = get_system_prompt(self.preferences)
+        print(f"🤖 Используется LLM провайдер: {LLM_PROVIDER}")
 
-    async def process_with_claude(self, user_message: str) -> list[str]:
-        """Обрабатывает сообщение через Claude API"""
+    async def process_with_llm(self, user_message: str) -> list[str]:
+        """Обрабатывает сообщение через LLM"""
 
-        response = self.claude.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=self.system_prompt,
-            messages=[
-                {"role": "user", "content": user_message}
-            ]
+        # LLM клиент синхронный, запускаем в executor
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(
+            None,
+            self.llm.generate,
+            self.system_prompt,
+            user_message
         )
 
         # Парсим ответ - каждая строка = один продукт
-        content = response.content[0].text
         products = [line.strip() for line in content.strip().split('\n') if line.strip()]
 
         return products
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
+        provider_name = "Claude" if LLM_PROVIDER == "claude" else "GigaChat"
         await update.message.reply_text(
-            "👋 Привет! Я помогу составить список покупок для Ozon Fresh.\n\n"
+            f"👋 Привет! Я помогу составить список покупок для Ozon Fresh.\n\n"
+            f"🧠 Использую: {provider_name}\n\n"
             "📝 Отправь мне:\n"
             "• Название блюда (например: \"борщ\")\n"
             "• Рецепт с ингредиентами\n"
@@ -119,7 +122,8 @@ class ShoppingListBot:
             "🛒 Я преобразую всё в список для маркетплейса и добавлю в корзину!\n\n"
             "Команды:\n"
             "/help - справка\n"
-            "/preferences - показать настройки"
+            "/preferences - показать настройки\n"
+            "/model - показать текущую модель"
         )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,6 +140,20 @@ class ShoppingListBot:
             "• Любимые производители\n"
             "• Количество персон по умолчанию\n"
             "• Исключения (аллергия)"
+        )
+
+    async def model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает текущую модель"""
+        if LLM_PROVIDER == "claude":
+            model_info = "Claude Sonnet 4 (Anthropic)"
+        else:
+            model_info = "GigaChat-2-Max (Sber)"
+
+        await update.message.reply_text(
+            f"🧠 Текущий LLM провайдер:\n\n"
+            f"**{model_info}**\n\n"
+            f"Для смены модели измените LLM_PROVIDER в .env",
+            parse_mode='Markdown'
         )
 
     async def preferences_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,11 +181,12 @@ class ShoppingListBot:
         user_message = update.message.text
 
         # Показываем что бот обрабатывает запрос
-        processing_msg = await update.message.reply_text("🔄 Обрабатываю запрос...")
+        provider_name = "Claude" if LLM_PROVIDER == "claude" else "GigaChat"
+        processing_msg = await update.message.reply_text(f"🔄 Обрабатываю через {provider_name}...")
 
         try:
-            # Получаем список продуктов от Claude
-            products = await self.process_with_claude(user_message)
+            # Получаем список продуктов от LLM
+            products = await self.process_with_llm(user_message)
 
             if not products:
                 await processing_msg.edit_text("❌ Не удалось распознать продукты. Попробуйте переформулировать.")
@@ -185,9 +204,6 @@ class ShoppingListBot:
 
             # Сохраняем список в файл для get-ozon.py
             await self.save_shopping_list(products)
-
-            # Запускаем автоматизацию Ozon
-            # await self.run_ozon_automation(products, update)
 
             await update.message.reply_text(
                 "📋 Список сохранён в shopping_list.txt\n"
@@ -212,10 +228,6 @@ class ShoppingListBot:
             print("❌ Ошибка: TELEGRAM_BOT_TOKEN не установлен в .env")
             return
 
-        if not CLAUDE_API_KEY:
-            print("❌ Ошибка: CLAUDE_API_KEY не установлен в .env")
-            return
-
         print("🤖 Запускаем Telegram бота...")
 
         # Создаём приложение
@@ -225,6 +237,7 @@ class ShoppingListBot:
         app.add_handler(CommandHandler("start", self.start_command))
         app.add_handler(CommandHandler("help", self.help_command))
         app.add_handler(CommandHandler("preferences", self.preferences_command))
+        app.add_handler(CommandHandler("model", self.model_command))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         # Запускаем бота

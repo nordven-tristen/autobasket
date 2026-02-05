@@ -10,8 +10,9 @@ numpy>=1.24.0
 # Telegram bot
 python-telegram-bot>=21.0
 
-# Claude API
+# LLM APIs
 anthropic>=0.18.0
+requests>=2.31.0
 
 # Config
 python-dotenv>=1.0.0
